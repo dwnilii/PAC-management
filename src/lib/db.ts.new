@@ -1,0 +1,98 @@
+import { open } from 'sqlite';
+import sqlite3 from 'sqlite3';
+import path from 'path';
+import fs from 'fs/promises';
+
+// Define database connection type
+type Database = Awaited<ReturnType<typeof open>>;
+
+// Database singleton instance
+let db: Database | null = null;
+
+// Initialize database from schema
+async function initializeDatabase(database: Database) {
+    const schemaPath = path.join(process.cwd(), 'src', 'lib', 'schema.sql');
+    const schema = await fs.readFile(schemaPath, 'utf-8');
+    
+    // Execute schema in a transaction
+    await database.exec('BEGIN TRANSACTION');
+    try {
+        await database.exec(schema);
+        await database.exec('COMMIT');
+        console.log('Database schema initialized successfully');
+    } catch (error) {
+        await database.exec('ROLLBACK');
+        console.error('Failed to initialize database schema:', error);
+        throw error;
+    }
+}
+
+// Function to validate database structure
+async function validateDatabase(database: Database) {
+    const tables = await database.all<{name: string}[]>(
+        "SELECT name FROM sqlite_master WHERE type='table';"
+    );
+    
+    const requiredTables = ['ous', 'proxies', 'settings'];
+    const missingTables = requiredTables.filter(
+        table => !tables.some(t => t.name === table)
+    );
+    
+    if (missingTables.length > 0) {
+        throw new Error(`Missing required tables: ${missingTables.join(', ')}`);
+    }
+    
+    // Validate foreign key constraints
+    const fkViolations = await database.all('PRAGMA foreign_key_check');
+    if (fkViolations.length > 0) {
+        throw new Error('Foreign key violations detected in database');
+    }
+    
+    return true;
+}
+
+export async function getDb() {
+    if (db) {
+        return db;
+    }
+
+    try {
+        const dbPath = path.join(process.cwd(), 'database.sqlite3');
+
+        // Delete existing database if it exists
+        try {
+            await fs.unlink(dbPath);
+            console.log('Deleted existing database');
+        } catch (err) {
+            // Ignore error if file doesn't exist
+        }
+        
+        // Ensure database directory exists
+        await fs.mkdir(path.dirname(dbPath), { recursive: true });
+
+        // Create new database connection
+        const newDb = await open({
+            filename: dbPath,
+            driver: sqlite3.Database,
+        });
+
+        // Enable foreign keys
+        await newDb.run('PRAGMA foreign_keys = ON');
+
+        // Initialize fresh database
+        console.log('Initializing new database...');
+        await initializeDatabase(newDb);
+        
+        // Validate database structure
+        await validateDatabase(newDb);
+        
+        console.log('Database initialized and validated successfully');
+        
+        db = newDb;
+        return db;
+        
+    } catch (error) {
+        console.error('Failed to initialize database:', error);
+        throw error;
+    }
+}
